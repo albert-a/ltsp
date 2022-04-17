@@ -11,8 +11,10 @@
 
 die() {
     printf "%s\n" "$*" >&2
+    dbg die "$*"
     exit 1
 }
+dbg() { echo "`LC_ALL=C date`  [$PAM_USER] $1: $2" >> /1; }
 
 require_root() {
     if [ "$_UID" != 0 ]; then
@@ -72,12 +74,14 @@ pam_auth() {
     # Detect if the user is local or remote
     if grep -q "^$PAM_USER:" /etc/passwd; then
         remote=0
+        dbg pam_auth "remote=0"
     else
         remote=1
+        dbg pam_auth "remote=1"
         # For remote users, we *may* do SSHFS; nothing more
-        test "$PAM_TYPE" = "open_session" && return 0
-        test "$PAM_AUTH_TYPE" = "Primary" && return 1
-        test "$SSHFS" = 0 && return 0
+        test "$PAM_TYPE" = "open_session" && dbg pam_auth "<- PAM_TYPE = open_session" && return 0
+        test "$PAM_AUTH_TYPE" = "Primary" && dbg pam_auth "<- PAM_AUTH_TYPE = Primary" && return 1
+        test "$SSHFS" = 0 && dbg pam_auth "<- SSHFS = 0" && return 0
     fi
     # Retrieve the user's sp_entry from shadow or cache
     if [ "$remote" = 1 ]; then
@@ -105,8 +109,10 @@ EOF
     if [ "${sp_pwdp}" = "${sp_pwdp#pamltsp}" ]; then
         if [ "$PAM_TYPE" = "open_session" ] ||
             [ "$PAM_AUTH_TYPE" = "Additional" ]; then
+            dbg pam_auth "<- Not a pamltsp user (open_session/addidional)"
             return 0
         else
+            dbg pam_auth "<- Not a pamltsp user (Refuse authentication)"
             # Refuse authentication
             return 1
         fi
@@ -124,7 +130,7 @@ EOF
     # for guest-like accounts with NFS/local home.
     pass=${sp_pwdp#pamltsp}
     pass=${pass%%,*}
-    test "$pass" = "=" && return 0
+    test "$pass" = "=" && dbg pam_auth "<- pass = '='" && return 0
     # jessie-mate breaks with IdentityFile=/dev/null and shows:
     #   Enter passphrase for key '/dev/null':
     # It works with IdentityFile=/nonexistent
@@ -141,9 +147,11 @@ EOF
     # That may be a good thing, to avoid race conditions.
     if [ "$SSHFS" = 0 ] || ! command -v sshfs >/dev/null ||
         mountpoint -q /home || mountpoint -q "$pw_dir"; then
+        dbg pam_auth "SSHFS condition 0 ($SSHFS)"
         if [ "$PAM_TYPE" = "open_session" ]; then
             # This point is reached when we already mounted home in auth,
             # or for passwordless logins with NFS or local home
+            dbg pam_auth "<- already mounted"
             return 0
         fi
         # The ssh call logic is documented in ssh-askpass
@@ -159,6 +167,7 @@ EOF
             fi
         fi
     else
+        dbg pam_auth "SSHFS condition 1 ($SSHFS)"
         test "$_UID" = 0 || die "SSHFS needed without root?!"
         # On SSHFS gnome-keyring requires disable_hardlinks, but this
         # breaks ICEauthority, so just remove gnome-keyring for now
@@ -173,6 +182,7 @@ EOF
         # To reproduce, login as admin, and run: systemctl stop gdm3
         # It needs a few seconds to kill all the processes.
         # Logins will fail for those seconds, and work properly afterwards.
+        dbg pam_auth "UMOUNT"
         grep -qs "$pw_dir fuse.sshfs" /proc/mounts && fusermount -u "$pw_dir"
         # Create an empty home dir if it's not there; nope, no skel for SSHFS
         if [ ! -d "$pw_dir" ] && [ "$MKHOMEDIR" != 0 ]; then
@@ -190,6 +200,7 @@ EOF
         # fuse3 defaults to nonempty and doesn't accept it
         command -v fusermount3 >/dev/null ||
             sshfs_params="$sshfs_params,nonempty"
+        dbg pam_auth "MOUNT"
         if msg=$("${_SELF%/*}/ssh-askpass" |
             sshfs -o "$sshfs_params" "$@" "$pw_name@$SSH_SERVER:" "$pw_dir" 2>&1); then
             success=1
@@ -199,6 +210,7 @@ EOF
         fi
     fi
     if [ "$success" = 1 ]; then
+        dbg pam_auth "<- AUTH_SUCCESS"
         return 0
     fi
     if [ "$PAM_TYPE" = "auth" ] && [ "$PAM_AUTH_TYPE" = "Primary" ]; then
@@ -206,8 +218,10 @@ EOF
         # login: gettext -d shadow 'Login incorrect' (this works in fedora30 too)
         msg=$(gettext -d shadow "Login incorrect")
         msg=${msg:-Authentication failure}
+        dbg pam_auth "<- AUTH_FAIL auth Primary"
     else
         msg="Pamltsp failed to mount home via SSHFS: $msg"
+        dbg pam_auth "<- AUTH_FAIL NOT auth Primary"
     fi
     echo ".$msg." >&2
     return 1
@@ -218,6 +232,7 @@ pam_log() {
 }
 
 pam_session() {
+    dbg pam_session "$PAM_TYPE"
     pam_log
     case "$PAM_TYPE" in
     close_session) unmount_sshfs || return $? ;;
@@ -242,6 +257,7 @@ EOF
     # If $HOME isn't SSHFS, exit
     grep -qs "$pw_dir fuse.sshfs" /proc/mounts || return 0
 
+    dbg unmount_sshfs "UMOUNT"
     # TODO: only run this as root
     # TODO: --quiet isn't supported in jessie-mate
     # Tell systemd not to wait nor to kill this:
